@@ -8,6 +8,12 @@
  * supplied and `manual: true`, so it renders with the whiteboard look,
  * persists, de-dups, shows up in `.list()`, and clears with the board.
  *
+ * A placed AREA can be re-shaped: clicking inside one (when not mid-draw) pulls
+ * it back off the board into a fresh session — its ring becomes draggable vertex
+ * handles — so the same finish/undo/cancel path that draws a new polygon edits
+ * an old one. Enter saves the new outline (the original was removed on enter, so
+ * the save replaces it), Esc/leaving/Clear puts the untouched area back.
+ *
  * Two ownership rules make it safe to share the scene with the layers:
  *
  * - While a session is open the tool HOLDS THE POINTER
@@ -45,12 +51,15 @@ import {
   finishReason,
   finishSpec,
   normalizeShape,
+  pointInRing,
   removeLastVertex,
 } from './drawMode.js';
 
 /** The id this tool claims the pointer under. */
 export const DRAW_POINTER_OWNER = 'draw';
 const PREVIEW_DATA_SOURCE_NAME = 'gev-draw-preview';
+/** How close (px) a click must land to a vertex handle to grab it for dragging. */
+const VERTEX_GRAB_PX = 14;
 
 const COLORS = ['primary', 'amber', 'cyan', 'green', 'red'];
 const PREVIEW = {
@@ -87,6 +96,15 @@ export function initDrawTool({ viewer, annotations }) {
   let savedDoubleClick = null;
   let savedSingleClick = null;
   let cursor = null; // last mouse position on the canvas, for the rubber band
+  // Editing a PLACED area: a click inside one pulls it off the board back into a
+  // session (`editing` holds its id + a spec to restore on cancel), so the same
+  // finish/undo/cancel pipeline that draws a new area also re-shapes an old one.
+  // `dragIndex` is the vertex being dragged (−1 when none); a drag suppresses the
+  // trailing LEFT_CLICK so dropping a vertex doesn't also add one.
+  let editing = null;
+  let dragIndex = -1;
+  let suppressNextClick = false;
+  let savedCameraInputs = null;
   // Bumped by anything that supersedes an in-flight finish: cancelling, clearing
   // the board, leaving draw mode, teardown. An `annotate()` that resolves after
   // one of those must not write its outcome over the newer state.
@@ -184,10 +202,107 @@ export function initDrawTool({ viewer, annotations }) {
     const h = canvas.clientHeight || canvas.height || 1;
     return pickWorldFromScreen(viewer, position.x / w, position.y / h);
   };
+  // ---- editing a placed area -------------------------------------------
+  /** Screen (canvas) position of a session vertex, or null off-screen/unsupported. */
+  const screenOf = (v) => {
+    const scene = viewer.scene;
+    if (typeof scene?.cartesianToCanvasCoordinates !== 'function') return null;
+    const world = Cesium.Cartesian3.fromDegrees(v.lon, v.lat, v.height || 0);
+    return scene.cartesianToCanvasCoordinates(world) || null;
+  };
+  /** Index of the session vertex under a click, or −1. Screen-space so the grab
+   *  radius is constant in pixels at any zoom. */
+  const vertexUnder = (position) => {
+    if (!session?.vertices?.length) return -1;
+    let best = -1;
+    let bestD = VERTEX_GRAB_PX;
+    for (let i = 0; i < session.vertices.length; i += 1) {
+      const s = screenOf(session.vertices[i]);
+      if (!s) continue;
+      const d = Math.hypot(s.x - position.x, s.y - position.y);
+      if (d <= bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    return best;
+  };
+  /** A placed, hand-drawn area whose ring contains lon/lat — the one to edit. */
+  const editableAreaAt = (lon, lat) => {
+    if (typeof annotations.list !== 'function') return null;
+    // Last drawn is topmost — prefer it when areas overlap.
+    const areas = annotations
+      .list()
+      .filter((a) => a?.type === 'area' && Array.isArray(a.ring));
+    for (let i = areas.length - 1; i >= 0; i -= 1) {
+      if (pointInRing(areas[i].ring, lon, lat)) return areas[i];
+    }
+    return null;
+  };
+  /** The annotate() spec that recreates a placed area verbatim (to restore on cancel). */
+  const specFromArea = (anno) => ({
+    type: 'area',
+    manual: true,
+    ring: anno.ring.map(([lon, lat]) => [lon, lat]),
+    label: anno.label || null,
+    color: anno.color || 'primary',
+  });
+  /** Pull a placed area off the board into the session for re-shaping. */
+  const enterEdit = (anno) => {
+    if (typeof annotations.remove !== 'function') return false;
+    const spec = specFromArea(anno);
+    generation += 1;
+    session = createDrawSession('area');
+    // Drop a closing duplicate vertex so its handle doesn't stack on the first.
+    const ring = anno.ring.slice();
+    if (
+      ring.length > 1 &&
+      ring[0][0] === ring[ring.length - 1][0] &&
+      ring[0][1] === ring[ring.length - 1][1]
+    )
+      ring.pop();
+    session.vertices = ring.map(([lon, lat]) => ({ lon, lat, height: 0 }));
+    editing = { id: anno.id, spec };
+    // Carry the area's own label + colour into the controls so finish() rebuilds
+    // it with them rather than blanking either.
+    if (labelInput) labelInput.value = anno.label || '';
+    if (COLORS.includes(anno.color)) {
+      color = anno.color;
+      if (colorSelect) colorSelect.value = anno.color;
+    }
+    annotations.remove(anno.id);
+    cursor = null;
+    syncPreview();
+    setHint('Editing area — drag a point to move it, Backspace removes one, Enter saves, Esc cancels.');
+    return true;
+  };
+  /** Put the pre-edit area back exactly as it was (cancel / leaving mid-edit). */
+  const restoreEditing = () => {
+    if (!editing) return;
+    const spec = editing.spec;
+    editing = null;
+    void annotations.annotate([spec], { persist: true, flyTo: false });
+  };
+
   const onClick = (event) => {
     if (!session || destroyed) return;
+    // A drag just ended: Cesium still fires the click that concluded it — that
+    // click dropped a vertex, it must not also add one.
+    if (suppressNextClick) {
+      suppressNextClick = false;
+      return;
+    }
     const p = worldAt(event.position);
     if (!p) return;
+    // Not mid-draw + Area shape: a click inside a placed area edits it instead
+    // of starting a new one over the top.
+    if (!session.vertices.length && session.shape === 'area') {
+      const area = editableAreaAt(p.lon, p.lat);
+      if (area) {
+        enterEdit(area);
+        return;
+      }
+    }
     const { added, reason } = addVertex(session, p);
     if (added) {
       syncPreview();
@@ -202,8 +317,44 @@ export function initDrawTool({ viewer, annotations }) {
     else if (reason === 'invalid')
       setHint('That point is off the globe — click on the world.');
   };
+  // ---- dragging a vertex -----------------------------------------------
+  const onDown = (event) => {
+    if (!session || destroyed || session.shape === 'pin') return;
+    const i = vertexUnder(event.position);
+    if (i < 0) return;
+    dragIndex = i;
+    // Freeze the camera so dragging a handle moves the point, not the globe.
+    const controller = viewer.scene?.screenSpaceCameraController;
+    if (controller) {
+      savedCameraInputs = controller.enableInputs;
+      controller.enableInputs = false;
+    }
+  };
+  const onUp = () => {
+    if (dragIndex < 0) return;
+    dragIndex = -1;
+    const controller = viewer.scene?.screenSpaceCameraController;
+    if (controller && savedCameraInputs !== null)
+      controller.enableInputs = savedCameraInputs;
+    savedCameraInputs = null;
+    suppressNextClick = true;
+    viewer.scene?.requestRender?.();
+  };
   const onMove = (event) => {
-    if (!session || session.shape === 'pin' || destroyed) return;
+    if (!session || destroyed) return;
+    if (dragIndex >= 0) {
+      const p = worldAt(event.endPosition);
+      if (p && session.vertices[dragIndex]) {
+        session.vertices[dragIndex] = {
+          lon: p.lon,
+          lat: p.lat,
+          height: p.height || 0,
+        };
+        syncPreview();
+      }
+      return;
+    }
+    if (session.shape === 'pin') return;
     const p = worldAt(event.endPosition);
     cursor = p
       ? Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.height || 0)
@@ -227,6 +378,9 @@ export function initDrawTool({ viewer, annotations }) {
     // half of a double-click cannot submit the same shape twice.
     session = createDrawSession(shape);
     cursor = null;
+    // Committed: the edited area's original was already removed on enter, so the
+    // new spec replaces it — there is nothing left to restore.
+    editing = null;
     syncPreview();
     if (labelInput) labelInput.value = '';
     const attempt = generation;
@@ -247,6 +401,9 @@ export function initDrawTool({ viewer, annotations }) {
   const cancel = () => {
     if (!session) return;
     generation += 1;
+    // Editing? Put the untouched area back — Esc undoes the edit, it doesn't
+    // delete the area.
+    if (editing) restoreEditing();
     session = createDrawSession(shape);
     cursor = null;
     syncPreview();
@@ -255,6 +412,9 @@ export function initDrawTool({ viewer, annotations }) {
   const clearAll = () => {
     generation += 1;
     cursor = null;
+    // Wiping the board discards any edit in progress too — its area is already
+    // off the board, so there is nothing to restore.
+    editing = null;
     if (session) session = createDrawSession(shape);
     annotations.clear();
     syncPreview();
@@ -340,6 +500,9 @@ export function initDrawTool({ viewer, annotations }) {
       syncPreview();
     } else {
       generation += 1;
+      // Leaving draw mode mid-edit puts the untouched area back rather than
+      // dropping it (it was pulled off the board on enter).
+      if (editing) restoreEditing();
       session = null;
       cursor = null;
       releaseSceneHandler();
@@ -354,6 +517,8 @@ export function initDrawTool({ viewer, annotations }) {
     if (handler) return;
     handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
     handler.setInputAction(onClick, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+    handler.setInputAction(onDown, Cesium.ScreenSpaceEventType.LEFT_DOWN);
+    handler.setInputAction(onUp, Cesium.ScreenSpaceEventType.LEFT_UP);
     handler.setInputAction(onMove, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
     handler.setInputAction(() => {
       void finish();
@@ -418,6 +583,8 @@ export function initDrawTool({ viewer, annotations }) {
       }
       if (active) {
         generation += 1;
+        // Switching shape abandons an edit — restore the area untouched.
+        if (editing) restoreEditing();
         session = createDrawSession(shape);
         cursor = null;
         syncPreview();
@@ -461,6 +628,22 @@ export function initDrawTool({ viewer, annotations }) {
       if (r.added) syncPreview();
       return r.added;
     },
+    get editing() {
+      return Boolean(editing);
+    },
+    /** Test seam: pull the placed area under lon/lat into the session to edit. */
+    editAreaAt(lon, lat) {
+      if (session?.vertices?.length || session?.shape !== 'area') return false;
+      const area = editableAreaAt(lon, lat);
+      return area ? enterEdit(area) : false;
+    },
+    /** Test seam: move an existing session vertex, as a drag would. */
+    moveVertex(index, lon, lat, height = 0) {
+      if (!session?.vertices?.[index]) return false;
+      session.vertices[index] = { lon, lat, height };
+      syncPreview();
+      return true;
+    },
     finish,
     cancel,
     clearAll,
@@ -470,6 +653,7 @@ export function initDrawTool({ viewer, annotations }) {
       return {
         active,
         destroyed,
+        editing: Boolean(editing),
         sceneHandler: Boolean(handler),
         domListeners: domListeners.length,
         previewDataSources: countPreviewDataSources(viewer),
@@ -500,6 +684,9 @@ export function initDrawTool({ viewer, annotations }) {
       if (destroyed) return attaching;
       // Supersede any finish still in flight before anything is torn down.
       generation += 1;
+      // Tearing everything down: don't re-annotate an in-progress edit onto an
+      // engine that's about to be destroyed.
+      editing = null;
       if (active) setActive(false);
       destroyed = true;
       releaseSceneHandler();

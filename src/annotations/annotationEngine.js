@@ -951,6 +951,23 @@ export function createAnnotationEngine({
     syncAnnotationHold();
   }
 
+  /**
+   * Remove a SINGLE annotation by id — used by the draw tool to pull a placed
+   * area back for editing and to replace it on finish. Unlike clear() this does
+   * NOT bump the generation or abort pending work: it touches one mark, not the
+   * board. Returns whether one was removed.
+   */
+  function remove(id) {
+    const anno = annotations.get(id);
+    if (!anno) return false;
+    renderer.remove(anno);
+    annotations.delete(id);
+    renderer.sync(annotations);
+    syncAnnotationHold();
+    viewer.scene?.requestRender?.();
+    return true;
+  }
+
   /** Begin a graceful fade-out of everything, then remove. */
   function fadeOutAll() {
     const now = performance.now();
@@ -1075,6 +1092,7 @@ export function createAnnotationEngine({
   const engine = {
     annotate,
     clear,
+    remove,
     destroy() {
       if (destroyed) return;
       destroyed = true;

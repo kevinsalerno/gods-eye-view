@@ -90,7 +90,7 @@
       </div>
     </div>
     <div class="pp-toggle-group">
-      <button class="pp-toggle-btn" id="draw-toggle" title="Draw on the world — click vertices, double-click or Enter to finish, Esc to cancel" aria-pressed="false">
+      <button class="pp-toggle-btn" id="draw-toggle" title="Draw on the world — click vertices, double-click or Enter to finish, Esc to cancel. Click inside a placed area to edit it: drag a point to move it, Backspace removes one." aria-pressed="false">
         <span class="pp-icon material-symbols-outlined" aria-hidden="true">draw</span>
         <span class="pp-label">Draw</span>
       </button>
@@ -113,6 +113,11 @@
         </select>
         <button class="pp-mode-btn draw-clear-btn" id="draw-clear" type="button" title="Remove every mark from the board">Clear</button>
         <span class="draw-hint" id="draw-hint" aria-live="polite"></span>
+      </div>
+      <div class="pp-slider-row" id="geofence-alert-row">
+        <input type="url" class="pp-text-input" id="geofence-webhook-url" maxlength="2000" placeholder="Breach alert URL (POST)" aria-label="Geofence breach webhook URL — POSTed a JSON payload when an entity enters an area" autocomplete="off" spellcheck="false" inputmode="url">
+        <button class="pp-mode-btn" id="geofence-test" type="button" title="Send a mock breach payload to the alert URL to verify connectivity">Test</button>
+        <span class="draw-hint geofence-status" id="geofence-status" role="status" aria-live="assertive"></span>
       </div>
     </div>
     <div class="pp-toggle-group">

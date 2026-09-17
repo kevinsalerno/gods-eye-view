@@ -196,6 +196,36 @@ export function ringAreaM2(vertices) {
   return Math.abs(twice) / 2;
 }
 
+/**
+ * Whether a lon/lat point falls inside a ring (ray-casting, even-odd rule). The
+ * ring is [[lon,lat],...], open or closed. Longitudes — the ring's and the test
+ * point's — are made continuous relative to the ring's first vertex first, so a
+ * shape straddling the antimeridian is tested on the same unwrapped grid the
+ * area/centroid maths use rather than tearing at 180°. Used to pick a placed
+ * area to edit from a click inside it.
+ * @param {Array<[number, number]>} ring
+ */
+export function pointInRing(ring, lon, lat) {
+  if (!Array.isArray(ring) || ring.length < 3) return false;
+  const pts = unwrapLongitudes(ring.map(([rl, rt]) => ({ lon: rl, lat: rt })));
+  const reference = pts[0].lon;
+  let x = lon;
+  while (x - reference > 180) x -= 360;
+  while (x - reference < -180) x += 360;
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i, i += 1) {
+    const xi = pts[i].lon;
+    const yi = pts[i].lat;
+    const xj = pts[j].lon;
+    const yj = pts[j].lat;
+    const intersects =
+      yi > lat !== yj > lat &&
+      x < ((xj - xi) * (lat - yi)) / (yj - yi) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
 /** Vertex-average centroid of a ring, {lon, lat}, safe across the antimeridian. */
 export function ringCentroid(vertices) {
   if (!vertices?.length) return null;

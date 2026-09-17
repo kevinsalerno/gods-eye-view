@@ -1,6 +1,7 @@
 import { SceneDirector } from '../scenes/director.js';
 import { initAnnotations } from '../annotations/index.js';
 import { initDrawTool } from '../annotations/drawTool.js';
+import { installGeofenceMonitor } from '../annotations/geofenceMonitor.js';
 import { initGevVoiceCommands } from '../voice/gevRealtime.js';
 import { installScopeMask, destroyScopeMask } from '../scopeMask.js';
 import {
@@ -53,6 +54,14 @@ export function createApplicationTools({
   // lifetime rather than to whoever last pressed the button.
   const drawTool = initDrawTool({ viewer, annotations });
   defer(() => drawTool?.destroy());
+  // Geofence watch: on every live position update, test entity coordinates
+  // against the drawn areas and dispatch `gev:geofence` enter/exit transitions.
+  const geofenceMonitor = installGeofenceMonitor({
+    viewer,
+    dataManager,
+    annotations,
+  });
+  defer(() => geofenceMonitor.dispose());
   if (startChrome)
     defer(startChrome({ loadingScreen, styleManager, dataManager, signal }));
   // Idle render governor: flips the scene into requestRenderMode whenever
@@ -108,6 +117,7 @@ export function createApplicationTools({
     sceneDirector,
     mapStackController,
     annotations,
+    geofenceMonitor,
     weatherEffects,
     cockpitCloudEffects,
     getRenderGovernorDiagnostics,

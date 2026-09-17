@@ -864,6 +864,39 @@
   color: var(--text-dim);
   line-height: 1.4;
 }
+#geofence-test {
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+}
+/* Breach banner + connectivity-test result. Empty by default = invisible. */
+.geofence-status:empty {
+  display: none;
+}
+.geofence-status.is-ok {
+  color: var(--accent-green, #4ade80);
+}
+.geofence-status.is-pending {
+  color: var(--text-dim);
+}
+.geofence-status.is-error {
+  color: var(--accent-red, #f87171);
+}
+.geofence-status.is-breach {
+  color: var(--accent-red, #f87171);
+  font-weight: 700;
+  animation: geofence-breach-pulse 0.6s ease-in-out 3;
+}
+@keyframes geofence-breach-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
 body.gev-drawing #cesiumContainer canvas {
   cursor: crosshair;
 }

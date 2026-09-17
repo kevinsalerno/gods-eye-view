@@ -194,15 +194,41 @@ function fakeViewer() {
 }
 
 function fakeAnnotations() {
-  const calls = { annotate: [], clear: 0 };
+  const calls = { annotate: [], clear: 0, remove: [] };
+  const store = [];
+  let seq = 0;
   return {
     calls,
+    store,
     async annotate(specs, options) {
       calls.annotate.push({ specs, options });
+      // Mirror the engine: an area spec becomes a placed record list()/remove()
+      // can see, so the tool's edit path has something to pull back.
+      for (const spec of specs) {
+        if (spec?.type === 'area' && Array.isArray(spec.ring)) {
+          store.push({
+            id: `anno-${++seq}`,
+            type: 'area',
+            ring: spec.ring.map(([lon, lat]) => [lon, lat]),
+            label: spec.label || null,
+            color: spec.color || 'primary',
+          });
+        }
+      }
       return { drawn: specs.length };
     },
     clear() {
       calls.clear += 1;
+      store.length = 0;
+    },
+    remove(id) {
+      calls.remove.push(id);
+      const at = store.findIndex((a) => a.id === id);
+      if (at >= 0) store.splice(at, 1);
+      return at >= 0;
+    },
+    list() {
+      return [...store];
     },
   };
 }
@@ -359,6 +385,70 @@ test('Enter finishes from the canvas and the label field, never from a focused b
     await Promise.resolve();
     assert.equal(h.annotations.calls.annotate.length, 1, 'Enter on the map finishes');
     assert.equal(h.annotations.calls.annotate[0].specs[0].type, 'area');
+  } finally {
+    h.restore();
+  }
+});
+
+test('a placed area can be pulled back, reshaped, and saved as its replacement', async () => {
+  const h = harness();
+  try {
+    h.element('draw-toggle').emit('click');
+    // Draw a triangle and finish it.
+    h.tool.addVertex(-97.75, 30.26);
+    h.tool.addVertex(-97.73, 30.26);
+    h.tool.addVertex(-97.74, 30.28);
+    h.documentDouble.emit('keydown', { key: 'Enter', target: h.documentDouble.body });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(h.annotations.store.length, 1, 'one area is on the board');
+    const originalId = h.annotations.store[0].id;
+
+    // Click inside it → editing that area (it comes off the board into a session).
+    assert.equal(h.tool.editAreaAt(-97.74, 30.265), true, 'click inside enters edit');
+    assert.equal(h.tool.editing, true);
+    assert.equal(h.annotations.store.length, 0, 'the area is pulled off the board');
+    assert.equal(h.annotations.calls.remove[0], originalId);
+    assert.equal(h.tool.session.vertices.length, 3, 'its ring became handles');
+
+    // Move one vertex, then save.
+    h.tool.moveVertex(2, -97.74, 30.30);
+    h.documentDouble.emit('keydown', { key: 'Enter', target: h.documentDouble.body });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(h.tool.editing, false, 'saving ends the edit');
+    assert.equal(h.annotations.store.length, 1, 'still exactly one area — a replacement, not a duplicate');
+    const saved = h.annotations.calls.annotate.at(-1).specs[0];
+    assert.deepEqual(saved.ring.at(-2), [-97.74, 30.3], 'the moved vertex was saved');
+  } finally {
+    h.restore();
+  }
+});
+
+test('cancelling an edit puts the untouched area back', async () => {
+  const h = harness();
+  try {
+    h.element('draw-toggle').emit('click');
+    h.tool.addVertex(-97.75, 30.26);
+    h.tool.addVertex(-97.73, 30.26);
+    h.tool.addVertex(-97.74, 30.28);
+    h.documentDouble.emit('keydown', { key: 'Enter', target: h.documentDouble.body });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    h.tool.editAreaAt(-97.74, 30.265);
+    h.tool.moveVertex(0, -90, 10); // vandalise it
+    // Esc cancels the edit: the ORIGINAL ring goes back, not the vandalised one.
+    h.documentDouble.emit('keydown', { key: 'Escape', target: h.documentDouble.body });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(h.tool.editing, false);
+    assert.equal(h.annotations.store.length, 1, 'the area is back');
+    assert.deepEqual(
+      h.annotations.store[0].ring[0],
+      [-97.75, 30.26],
+      'restored to its pre-edit outline',
+    );
   } finally {
     h.restore();
   }

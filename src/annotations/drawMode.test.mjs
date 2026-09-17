@@ -18,6 +18,7 @@ import {
   closeRing,
   unwrapLongitudes,
   wrapLongitude,
+  pointInRing,
   MAX_VERTICES,
   MIN_VERTICES,
 } from './drawMode.js';
@@ -329,4 +330,27 @@ test('longitude unwrapping is continuous and re-wraps to one canonical range', (
   assert.equal(wrapLongitude(10), 10);
   assert.equal(wrapLongitude(180), -180);
   assert.equal(unwrapLongitudes([]).length, 0);
+});
+
+test('pointInRing decides inside vs outside, closed or open, across the antimeridian', () => {
+  const square = [
+    [-1, -1],
+    [1, -1],
+    [1, 1],
+    [-1, 1],
+  ];
+  assert.equal(pointInRing(square, 0, 0), true, 'centre is inside');
+  assert.equal(pointInRing(square, 2, 0), false, 'a point outside is outside');
+  // A closed ring (last === first) decides the same as its open form.
+  assert.equal(pointInRing([...square, [-1, -1]], 0, 0), true);
+  // A ring straddling 180° is tested on the unwrapped grid, not torn at the seam.
+  const seam = [
+    [179.5, -1],
+    [-179.5, -1],
+    [-179.5, 1],
+    [179.5, 1],
+  ];
+  assert.equal(pointInRing(seam, 180, 0), true, 'inside across the seam');
+  assert.equal(pointInRing(seam, 0, 0), false, 'the far side of the globe is outside');
+  assert.equal(pointInRing([[0, 0], [1, 1]], 0.5, 0.5), false, 'too few vertices → false');
 });
